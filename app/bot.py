@@ -100,7 +100,7 @@ async def transcribe_audio(audio_url: str) -> dict:
                 response_text = await response.text()
                 logger.debug(f"Transcription response body: {response_text}")
                 
-                if response.status != 200:
+                if response.status not in [200, 201]:
                     logger.error(f"Transcription failed with status {response.status}")
                     logger.error(f"Response: {response_text}")
                     return {}
@@ -121,6 +121,7 @@ async def get_transcription_result(result_url: str) -> dict:
     try:
         async with aiohttp.ClientSession() as session:
             while True:
+                # Используем полный URL, который получили от API
                 async with session.get(result_url, headers=headers) as response:
                     logger.debug(f"Poll response status: {response.status}")
                     response_text = await response.text()
@@ -197,12 +198,25 @@ async def handle_voice(message: types.Message):
         # Получаем результат
         result = await get_transcription_result(transcription_response["result_url"])
         
+        logger.debug(f"Final result: {json.dumps(result, indent=2, ensure_ascii=False)}")
+        
         if "result" in result and "transcription" in result["result"]:
             transcription = result["result"]["transcription"]
-            logger.info("Successfully transcribed audio")
-            await message.answer(f"Транскрибация:\n\n{transcription}")
+            full_text = transcription.get("full_transcript", "")
+            
+            # Логируем полный результат для отладки
+            logger.info(f"Successfully transcribed audio. Full text: {full_text}")
+            
+            # Отправляем только текст транскрибации
+            if len(full_text) > 4000:  # Telegram limit is 4096, using 4000 to be safe
+                # Разбиваем длинный текст на части
+                parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+                for i, part in enumerate(parts, 1):
+                    await message.answer(f"Часть {i}/{len(parts)}:\n\n{part}")
+            else:
+                await message.answer(f"Транскрибация:\n\n{full_text}")
         else:
-            logger.error("Failed to get transcription from result")
+            logger.error(f"Failed to get transcription from result. Result structure: {json.dumps(result, indent=2, ensure_ascii=False)}")
             await message.answer("Не удалось получить текст транскрибации. Пожалуйста, попробуйте еще раз.")
             
     except Exception as e:
