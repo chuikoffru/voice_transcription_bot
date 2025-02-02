@@ -13,15 +13,24 @@ from aiogram.filters import CommandStart
 from config import settings
 
 # Настройка логирования
+log_level = logging.DEBUG if settings.DEBUG else logging.INFO
+log_handlers = [logging.StreamHandler()]
+
+if settings.DEBUG:
+    log_handlers.append(logging.FileHandler('bot_debug.log'))
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+else:
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot_debug.log'),
-        logging.StreamHandler()
-    ]
+    level=log_level,
+    format=log_format,
+    handlers=log_handlers
 )
 logger = logging.getLogger(__name__)
+
+if settings.DEBUG:
+    logger.debug("Debug mode is enabled")
 
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher()
@@ -158,11 +167,12 @@ async def handle_start(message: types.Message):
 @dp.message(lambda message: message.voice or message.audio)
 async def handle_voice(message: types.Message):
     logger.info(f"Received {'voice' if message.voice else 'audio'} message from user {message.from_user.id}")
-    await message.answer("Начинаю обработку голосового сообщения...")
+    processing_msg = await message.reply("🎯 Начинаю обработку голосового сообщения...")
     
     try:
         # Получаем информацию о файле
         if message.voice:
+            await processing_msg.edit_text("⌛️ Загрузка голосового сообщения...")
             file = await bot.get_file(message.voice.file_id)
             filename = f"{message.voice.file_id}.ogg"
             logger.debug(f"Voice message file_id: {message.voice.file_id}")
@@ -180,22 +190,25 @@ async def handle_voice(message: types.Message):
         
         # Загружаем аудио на Gladia
         audio_content = await download_voice_message(file_content)
+        await processing_msg.edit_text("📤 Загрузка аудио на сервер...")
         upload_response = await upload_audio_to_gladia(audio_content, filename)
         
         if not upload_response.get("audio_url"):
             logger.error("Failed to get audio_url from upload response")
-            await message.answer("Ошибка при загрузке аудио. Пожалуйста, попробуйте еще раз.")
+            await processing_msg.edit_text("❌ Ошибка при загрузке аудио. Пожалуйста, попробуйте еще раз.")
             return
         
         # Отправляем на транскрибацию
+        await processing_msg.edit_text("🔍 Начинаю транскрибацию...")
         transcription_response = await transcribe_audio(upload_response["audio_url"])
         
         if not transcription_response.get("result_url"):
             logger.error("Failed to get result_url from transcription response")
-            await message.answer("Ошибка при отправке на транскрибацию. Пожалуйста, попробуйте еще раз.")
+            await processing_msg.edit_text("❌ Ошибка при отправке на транскрибацию. Пожалуйста, попробуйте еще раз.")
             return
         
         # Получаем результат
+        await processing_msg.edit_text("⏳ Ожидание результатов транскрибации...")
         result = await get_transcription_result(transcription_response["result_url"])
         
         logger.debug(f"Final result: {json.dumps(result, indent=2, ensure_ascii=False)}")
@@ -207,24 +220,37 @@ async def handle_voice(message: types.Message):
             # Логируем полный результат для отладки
             logger.info(f"Successfully transcribed audio. Full text: {full_text}")
             
+            try:
+                # Удаляем сообщение о процессе
+                await processing_msg.delete()
+            except Exception as e:
+                logger.warning(f"Failed to delete processing message: {e}")
+
             # Отправляем только текст транскрибации
             if len(full_text) > 4000:  # Telegram limit is 4096, using 4000 to be safe
                 # Разбиваем длинный текст на части
                 parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
-                for i, part in enumerate(parts, 1):
-                    await message.answer(f"Часть {i}/{len(parts)}:\n\n{part}")
+                # Первую часть отправляем как ответ на голосовое сообщение
+                await message.reply(f"✨ Часть 1/{len(parts)}:\n\n{parts[0]}")
+                # Остальные части отправляем как обычные сообщения
+                for i, part in enumerate(parts[1:], 2):
+                    await message.answer(f"✨ Часть {i}/{len(parts)}:\n\n{part}")
             else:
-                await message.answer(f"Транскрибация:\n\n{full_text}")
+                await message.reply(f"✨ Транскрибация:\n\n{full_text}")
         else:
             logger.error(f"Failed to get transcription from result. Result structure: {json.dumps(result, indent=2, ensure_ascii=False)}")
-            await message.answer("Не удалось получить текст транскрибации. Пожалуйста, попробуйте еще раз.")
+            await processing_msg.edit_text("❌ Не удалось получить текст транскрибации. Пожалуйста, попробуйте еще раз.")
             
     except Exception as e:
         logger.error(f"Error processing voice message: {str(e)}", exc_info=True)
-        await message.answer(
-            "Произошла ошибка при обработке голосового сообщения. "
+        error_message = (
+            "❌ Произошла ошибка при обработке голосового сообщения.\n"
             "Пожалуйста, попробуйте еще раз или обратитесь к администратору."
         )
+        try:
+            await processing_msg.edit_text(error_message)
+        except Exception:
+            await message.reply(error_message)
 
 async def main():
     logger.info("Starting bot")
