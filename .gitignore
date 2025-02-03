@@ -4,3 +4,4 @@ __pycache__
 .env
 venv
 bot_debug.log
+transcription_bot.db

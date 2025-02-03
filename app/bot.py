@@ -3,30 +3,26 @@ import io
 import logging
 from typing import BinaryIO
 import json
-from datetime import datetime
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart
 
 from config import settings
+from models import init_db, Usage, db
+from peewee import fn
 
 # Настройка логирования
 log_level = logging.DEBUG if settings.DEBUG else logging.INFO
 log_handlers = [logging.StreamHandler()]
 
 if settings.DEBUG:
-    log_handlers.append(logging.FileHandler('bot_debug.log'))
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    log_handlers.append(logging.FileHandler("bot_debug.log"))
+    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 else:
-    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    log_format = "%(asctime)s - %(levelname)s - %(message)s"
 
-logging.basicConfig(
-    level=log_level,
-    format=log_format,
-    handlers=log_handlers
-)
+logging.basicConfig(level=log_level, format=log_format, handlers=log_handlers)
 logger = logging.getLogger(__name__)
 
 if settings.DEBUG:
@@ -35,98 +31,103 @@ if settings.DEBUG:
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher()
 
+
 async def download_voice_message(file: BinaryIO) -> bytes:
     logger.debug("Starting voice message download")
     try:
         content = file.read()
-        logger.debug(f"Successfully downloaded voice message, size: {len(content)} bytes")
+        logger.debug(
+            f"Successfully downloaded voice message, size: {len(content)} bytes"
+        )
         return content
     except Exception as e:
         logger.error(f"Error downloading voice message: {str(e)}", exc_info=True)
         raise
 
+
 async def upload_audio_to_gladia(audio_content: bytes, filename: str) -> dict:
     logger.debug(f"Starting upload for file: {filename}")
     logger.debug(f"Audio content size: {len(audio_content)} bytes")
-    
+
     headers = {
         "x-gladia-key": settings.GLADIA_API_KEY,
         "accept": "application/json",
     }
-    
+
     try:
         form = aiohttp.FormData()
-        form.add_field('audio', 
-                      audio_content,
-                      filename=filename,
-                      content_type='audio/ogg')
-        
+        form.add_field(
+            "audio", audio_content, filename=filename, content_type="audio/ogg"
+        )
+
         logger.debug("Headers for upload request:")
         logger.debug(json.dumps(headers, indent=2))
-        
+
         async with aiohttp.ClientSession() as session:
-            async with session.post("https://api.gladia.io/v2/upload/", 
-                                  headers=headers, 
-                                  data=form) as response:
+            async with session.post(
+                "https://api.gladia.io/v2/upload/", headers=headers, data=form
+            ) as response:
                 logger.debug(f"Upload response status: {response.status}")
                 response_text = await response.text()
                 logger.debug(f"Upload response body: {response_text}")
-                
+
                 if response.status != 200:
                     logger.error(f"Upload failed with status {response.status}")
                     logger.error(f"Response: {response_text}")
                     return {}
-                
+
                 return json.loads(response_text)
     except Exception as e:
         logger.error(f"Error during upload: {str(e)}", exc_info=True)
         return {}
 
+
 async def transcribe_audio(audio_url: str) -> dict:
     logger.debug(f"Starting transcription for URL: {audio_url}")
-    
+
     headers = {
         "x-gladia-key": settings.GLADIA_API_KEY,
         "accept": "application/json",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    
+
     data = {
         "audio_url": audio_url,
         "language": "ru",
         "diarization": True,
     }
-    
+
     try:
         logger.debug("Transcription request data:")
         logger.debug(json.dumps(data, indent=2))
-        
+
         async with aiohttp.ClientSession() as session:
-            async with session.post("https://api.gladia.io/v2/transcription/", 
-                                  headers=headers, 
-                                  json=data) as response:
+            async with session.post(
+                "https://api.gladia.io/v2/transcription/", headers=headers, json=data
+            ) as response:
                 logger.debug(f"Transcription response status: {response.status}")
                 response_text = await response.text()
                 logger.debug(f"Transcription response body: {response_text}")
-                
+
                 if response.status not in [200, 201]:
                     logger.error(f"Transcription failed with status {response.status}")
                     logger.error(f"Response: {response_text}")
                     return {}
-                
+
                 return json.loads(response_text)
     except Exception as e:
         logger.error(f"Error during transcription: {str(e)}", exc_info=True)
         return {}
 
+
 async def get_transcription_result(result_url: str) -> dict:
     logger.debug(f"Starting to poll for results at URL: {result_url}")
-    
+
     headers = {
         "x-gladia-key": settings.GLADIA_API_KEY,
         "accept": "application/json",
     }
-    
+
     try:
         async with aiohttp.ClientSession() as session:
             while True:
@@ -135,40 +136,93 @@ async def get_transcription_result(result_url: str) -> dict:
                     logger.debug(f"Poll response status: {response.status}")
                     response_text = await response.text()
                     logger.debug(f"Poll response body: {response_text}")
-                    
+
                     if response.status != 200:
                         logger.error(f"Polling failed with status {response.status}")
                         logger.error(f"Response: {response_text}")
                         raise Exception("Failed to get transcription result")
-                    
+
                     result = json.loads(response_text)
-                    
+
                     if result.get("status") == "done":
                         logger.debug("Transcription completed successfully")
                         return result
                     elif result.get("status") == "error":
                         logger.error("Transcription failed with error status")
                         raise Exception("Transcription failed")
-                    
+
                     logger.debug(f"Status: {result.get('status')}, waiting...")
                     await asyncio.sleep(1)
     except Exception as e:
         logger.error(f"Error getting transcription result: {str(e)}", exc_info=True)
         raise
 
+
 @dp.message(CommandStart())
 async def handle_start(message: types.Message):
     logger.info(f"Received /start command from user {message.from_user.id}")
     await message.answer(
-        "Привет! Я бот для транскрибации голосовых сообщений. "
-        "Отправь мне голосовое сообщение, и я преобразую его в текст."
+        "Привет! Я бот для транскрибации голосовых сообщений.\n"
+        "🎤 Отправь мне голосовое сообщение, и я преобразую его в текст.\n"
+        "📊 Используй /stats для просмотра статистики использования."
     )
+
+
+@dp.message(lambda message: message.text == "/stats")
+async def handle_stats(message: types.Message):
+    logger.info(f"Received /stats command from user {message.from_user.id}")
+    try:
+        with db:
+            # Получаем общую статистику пользователя
+            total_duration = (
+                Usage.select(fn.SUM(Usage.duration))
+                .where(Usage.tg_user_id == message.from_user.id)
+                .scalar()
+                or 0
+            )
+
+            total_messages = (
+                Usage.select().where(Usage.tg_user_id == message.from_user.id).count()
+            )
+
+            # Получаем последние 5 транскрибаций
+            recent_usages = (
+                Usage.select()
+                .where(Usage.tg_user_id == message.from_user.id)
+                .order_by(Usage.created_at.desc())
+                .limit(5)
+            )
+
+            # Формируем сообщение
+            stats_message = (
+                "📊 Ваша статистика использования:\n\n"
+                f"🎯 Всего транскрибаций: {total_messages}\n"
+                f"⏱ Общая длительность: {total_duration:.1f} сек.\n"
+                f"⌛️ Среднее время: {(total_duration / total_messages if total_messages else 0):.1f} сек.\n"
+            )
+
+            if recent_usages:
+                stats_message += "\n🔍 Последние транскрибации:\n"
+                for usage in recent_usages:
+                    stats_message += (
+                        f"- {usage.created_at.strftime('%Y-%m-%d %H:%M:%S')}: "
+                        f"{usage.duration:.1f} сек.\n"
+                    )
+
+            await message.answer(stats_message)
+
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}", exc_info=True)
+        await message.answer("❌ Произошла ошибка при получении статистики.")
+
 
 @dp.message(lambda message: message.voice or message.audio)
 async def handle_voice(message: types.Message):
-    logger.info(f"Received {'voice' if message.voice else 'audio'} message from user {message.from_user.id}")
+    logger.info(
+        f"Received {'voice' if message.voice else 'audio'} message from user {message.from_user.id}"
+    )
     processing_msg = await message.reply("🎯 Начинаю обработку голосового сообщения...")
-    
+
     try:
         # Получаем информацию о файле
         if message.voice:
@@ -180,46 +234,71 @@ async def handle_voice(message: types.Message):
             file = await bot.get_file(message.audio.file_id)
             filename = message.audio.file_name or f"{message.audio.file_id}.ogg"
             logger.debug(f"Audio message file_id: {message.audio.file_id}")
-        
+
         logger.debug(f"File path: {file.file_path}")
-        
+
         # Скачиваем файл
         file_content = io.BytesIO()
         await bot.download_file(file.file_path, file_content)
         file_content.seek(0)
-        
+
         # Загружаем аудио на Gladia
         audio_content = await download_voice_message(file_content)
         await processing_msg.edit_text("📤 Загрузка аудио на сервер...")
         upload_response = await upload_audio_to_gladia(audio_content, filename)
-        
+
         if not upload_response.get("audio_url"):
             logger.error("Failed to get audio_url from upload response")
-            await processing_msg.edit_text("❌ Ошибка при загрузке аудио. Пожалуйста, попробуйте еще раз.")
+            await processing_msg.edit_text(
+                "❌ Ошибка при загрузке аудио. Пожалуйста, попробуйте еще раз."
+            )
             return
-        
+
         # Отправляем на транскрибацию
         await processing_msg.edit_text("🔍 Начинаю транскрибацию...")
         transcription_response = await transcribe_audio(upload_response["audio_url"])
-        
+
         if not transcription_response.get("result_url"):
             logger.error("Failed to get result_url from transcription response")
-            await processing_msg.edit_text("❌ Ошибка при отправке на транскрибацию. Пожалуйста, попробуйте еще раз.")
+            await processing_msg.edit_text(
+                "❌ Ошибка при отправке на транскрибацию. Пожалуйста, попробуйте еще раз."
+            )
             return
-        
+
         # Получаем результат
         await processing_msg.edit_text("⏳ Ожидание результатов транскрибации...")
         result = await get_transcription_result(transcription_response["result_url"])
-        
-        logger.debug(f"Final result: {json.dumps(result, indent=2, ensure_ascii=False)}")
-        
+
+        logger.debug(
+            f"Final result: {json.dumps(result, indent=2, ensure_ascii=False)}"
+        )
+
         if "result" in result and "transcription" in result["result"]:
             transcription = result["result"]["transcription"]
             full_text = transcription.get("full_transcript", "")
-            
+
             # Логируем полный результат для отладки
             logger.info(f"Successfully transcribed audio. Full text: {full_text}")
-            
+
+            # Записываем использование в базу данных
+            try:
+                duration = (
+                    result.get("result", {})
+                    .get("metadata", {})
+                    .get("audio_duration", 0)
+                )
+                with db:
+                    Usage.create(
+                        tg_user_id=message.from_user.id,
+                        message_id=message.message_id,
+                        duration=duration,
+                    )
+                    logger.info(
+                        f"Usage recorded: user_id={message.from_user.id}, duration={duration}s"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to record usage: {e}", exc_info=True)
+
             try:
                 # Удаляем сообщение о процессе
                 await processing_msg.delete()
@@ -229,7 +308,9 @@ async def handle_voice(message: types.Message):
             # Отправляем только текст транскрибации
             if len(full_text) > 4000:  # Telegram limit is 4096, using 4000 to be safe
                 # Разбиваем длинный текст на части
-                parts = [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]
+                parts = [
+                    full_text[i : i + 4000] for i in range(0, len(full_text), 4000)
+                ]
                 # Первую часть отправляем как ответ на голосовое сообщение
                 await message.reply(f"✨ Часть 1/{len(parts)}:\n\n{parts[0]}")
                 # Остальные части отправляем как обычные сообщения
@@ -238,9 +319,13 @@ async def handle_voice(message: types.Message):
             else:
                 await message.reply(f"✨ Транскрибация:\n\n{full_text}")
         else:
-            logger.error(f"Failed to get transcription from result. Result structure: {json.dumps(result, indent=2, ensure_ascii=False)}")
-            await processing_msg.edit_text("❌ Не удалось получить текст транскрибации. Пожалуйста, попробуйте еще раз.")
-            
+            logger.error(
+                f"Failed to get transcription from result. Result structure: {json.dumps(result, indent=2, ensure_ascii=False)}"
+            )
+            await processing_msg.edit_text(
+                "❌ Не удалось получить текст транскрибации. Пожалуйста, попробуйте еще раз."
+            )
+
     except Exception as e:
         logger.error(f"Error processing voice message: {str(e)}", exc_info=True)
         error_message = (
@@ -252,14 +337,21 @@ async def handle_voice(message: types.Message):
         except Exception:
             await message.reply(error_message)
 
+
 async def main():
     logger.info("Starting bot")
     try:
+        # Инициализация базы данных
+        init_db()
+        logger.info("Database initialized")
+
+        # Запуск бота
         await dp.start_polling(bot)
     except Exception as e:
         logger.error(f"Error in main loop: {str(e)}", exc_info=True)
     finally:
         logger.info("Bot stopped")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
