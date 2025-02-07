@@ -6,10 +6,10 @@ import json
 
 import aiohttp
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 
 from config import settings
-from models import init_db, Usage, db
+from models import init_db, Usage, User, db, upsert_user, upsert_chat, upsert_user_chat
 from peewee import fn
 
 # Настройка логирования
@@ -120,6 +120,25 @@ async def transcribe_audio(audio_url: str) -> dict:
         return {}
 
 
+@dp.message()
+async def handle_text(message: types.Message):
+    """Обработчик всех текстовых сообщений для сохранения информации о пользователях и чатах"""
+    logger.debug(
+        f"Received text message from user {message.from_user.id} in chat {message.chat.id}"
+    )
+    try:
+        with db:
+            # Используем существующие функции upsert для оптимальной работы с БД
+            user = upsert_user(message.from_user)
+            chat = upsert_chat(message)
+            upsert_user_chat(user, chat)
+            logger.debug(
+                f"Successfully processed message: user={user.id}, chat={chat.id}"
+            )
+    except Exception as e:
+        logger.error(f"Error processing text message: {e}", exc_info=True)
+
+
 async def get_transcription_result(result_url: str) -> dict:
     logger.debug(f"Starting to poll for results at URL: {result_url}")
 
@@ -161,6 +180,12 @@ async def get_transcription_result(result_url: str) -> dict:
 @dp.message(CommandStart())
 async def handle_start(message: types.Message):
     logger.info(f"Received /start command from user {message.from_user.id}")
+    with db:
+        user = upsert_user(message.from_user)
+        logger.info(
+            f"User {user.id} ({user.username or user.firstname}) started the bot"
+        )
+
     await message.answer(
         "Привет! Я бот для транскрибации голосовых сообщений.\n"
         "🎤 Отправь мне голосовое сообщение, и я преобразую его в текст.\n"
@@ -168,27 +193,34 @@ async def handle_start(message: types.Message):
     )
 
 
-@dp.message(lambda message: message.text == "/stats")
+@dp.message(Command("stats"))
 async def handle_stats(message: types.Message):
     logger.info(f"Received /stats command from user {message.from_user.id}")
     try:
         with db:
+            user = upsert_user(message.from_user)
+
             # Получаем общую статистику пользователя
             total_duration = (
                 Usage.select(fn.SUM(Usage.duration))
-                .where(Usage.tg_user_id == message.from_user.id)
+                .join(User)
+                .where(User.tg_id == message.from_user.id)
                 .scalar()
                 or 0
             )
 
             total_messages = (
-                Usage.select().where(Usage.tg_user_id == message.from_user.id).count()
+                Usage.select()
+                .join(User)
+                .where(User.tg_id == message.from_user.id)
+                .count()
             )
 
             # Получаем последние 5 транскрибаций
             recent_usages = (
                 Usage.select()
-                .where(Usage.tg_user_id == message.from_user.id)
+                .join(User)
+                .where(User.tg_id == message.from_user.id)
                 .order_by(Usage.created_at.desc())
                 .limit(5)
             )
@@ -204,9 +236,15 @@ async def handle_stats(message: types.Message):
             if recent_usages:
                 stats_message += "\n🔍 Последние транскрибации:\n"
                 for usage in recent_usages:
+                    chat_name = usage.chat.name or str(usage.chat.tg_chat_id)
+                    chat_type = (
+                        "личном чате"
+                        if usage.chat.tg_chat_id == message.from_user.id
+                        else f"группе {chat_name}"
+                    )
                     stats_message += (
-                        f"- {usage.created_at.strftime('%Y-%m-%d %H:%M:%S')}: "
-                        f"{usage.duration:.1f} сек.\n"
+                        f"- {usage.created_at.strftime('%Y-%m-%d %H:%M:%S')} "
+                        f"в {chat_type}: {usage.duration:.1f} сек.\n"
                     )
 
             await message.answer(stats_message)
@@ -288,13 +326,18 @@ async def handle_voice(message: types.Message):
                     .get("audio_duration", 0)
                 )
                 with db:
+                    user = upsert_user(message.from_user)
+                    chat = upsert_chat(message)
+                    upsert_user_chat(user, chat)
                     Usage.create(
-                        tg_user_id=message.from_user.id,
+                        user=user,
+                        chat=chat,
                         message_id=message.message_id,
                         duration=duration,
                     )
                     logger.info(
-                        f"Usage recorded: user_id={message.from_user.id}, duration={duration}s"
+                        f"Usage recorded: user={user.id} ({user.username or user.firstname}), "
+                        f"chat_id={message.chat.id}, duration={duration}s"
                     )
             except Exception as e:
                 logger.error(f"Failed to record usage: {e}", exc_info=True)
