@@ -31,6 +31,11 @@ if settings.DEBUG:
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher()
 
+# Логирование всех входящих обновлений
+@dp.update()
+async def log_update(update):
+    logger.debug(f"Received update: {update.dict()}")
+
 
 async def download_voice_message(file: BinaryIO) -> bytes:
     logger.debug("Starting voice message download")
@@ -120,9 +125,10 @@ async def transcribe_audio(audio_url: str) -> dict:
         return {}
 
 
-@dp.message()
+@dp.message(lambda message: message.text and not message.text.startswith('/') and not message.voice and not message.audio)
 async def handle_text(message: types.Message):
-    """Обработчик всех текстовых сообщений для сохранения информации о пользователях и чатах"""
+    """Обработчик текстовых сообщений (не команд) для сохранения информации о пользователях и чатах"""
+    logger.debug(f"Received message type: text={bool(message.text)}, voice={bool(message.voice)}, audio={bool(message.audio)}")
     logger.debug(
         f"Received text message from user {message.from_user.id} in chat {message.chat.id}"
     )
@@ -259,6 +265,20 @@ async def handle_voice(message: types.Message):
     logger.info(
         f"Received {'voice' if message.voice else 'audio'} message from user {message.from_user.id}"
     )
+    logger.debug(f"Message content: {message.dict()}")
+    
+    # Сохраняем информацию о пользователе и чате
+    try:
+        with db:
+            user = upsert_user(message.from_user)
+            chat = upsert_chat(message)
+            upsert_user_chat(user, chat)
+            logger.debug(
+                f"Successfully processed voice message metadata: user={user.id}, chat={chat.id}"
+            )
+    except Exception as e:
+        logger.error(f"Error processing voice message metadata: {e}", exc_info=True)
+    
     processing_msg = await message.reply("🎯 Начинаю обработку голосового сообщения...")
 
     try:
@@ -388,8 +408,14 @@ async def main():
         init_db()
         logger.info("Database initialized")
 
+        # Регистрируем все обработчики
+        logger.debug("Registered handlers:")
+        for handler in dp.message.handlers:
+            logger.debug(f"- Handler with filter: {handler.callback}")
+
         # Запуск бота
-        await dp.start_polling(bot)
+        logger.info("Starting polling...")
+        await dp.start_polling(bot, allowed_updates=["message", "edited_message"], skip_updates=True)
     except Exception as e:
         logger.error(f"Error in main loop: {str(e)}", exc_info=True)
     finally:
