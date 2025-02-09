@@ -12,7 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from config import settings
 from models import init_db, Usage, User, db, upsert_user, upsert_chat, upsert_user_chat
 from llm_service import LLMService
-from user_service import find_matching_users, replace_name_with_username
+from user_service import process_chat_message, replace_name_with_username
 from peewee import fn
 
 # Настройка логирования
@@ -34,6 +34,7 @@ if settings.DEBUG:
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher()
 llm_service = LLMService(settings.DEEPSEEK_API_KEY)
+
 
 # Логирование всех входящих обновлений
 @dp.update()
@@ -129,10 +130,17 @@ async def transcribe_audio(audio_url: str) -> dict:
         return {}
 
 
-@dp.message(lambda message: message.text and not message.text.startswith('/') and not message.voice and not message.audio)
+@dp.message(
+    lambda message: message.text
+    and not message.text.startswith("/")
+    and not message.voice
+    and not message.audio
+)
 async def handle_text(message: types.Message):
     """Обработчик текстовых сообщений (не команд) для сохранения информации о пользователях и чатах"""
-    logger.debug(f"Received message type: text={bool(message.text)}, voice={bool(message.voice)}, audio={bool(message.audio)}")
+    logger.debug(
+        f"Received message type: text={bool(message.text)}, voice={bool(message.voice)}, audio={bool(message.audio)}"
+    )
     logger.debug(
         f"Received text message from user {message.from_user.id} in chat {message.chat.id}"
     )
@@ -270,7 +278,7 @@ async def handle_voice(message: types.Message):
         f"Received {'voice' if message.voice else 'audio'} message from user {message.from_user.id}"
     )
     logger.debug(f"Message content: {message.dict()}")
-    
+
     # Сохраняем информацию о пользователе и чате
     try:
         with db:
@@ -282,7 +290,7 @@ async def handle_voice(message: types.Message):
             )
     except Exception as e:
         logger.error(f"Error processing voice message metadata: {e}", exc_info=True)
-    
+
     processing_msg = await message.reply("🎯 Начинаю обработку голосового сообщения...")
 
     try:
@@ -379,7 +387,9 @@ async def handle_voice(message: types.Message):
                     full_text[i : i + 4000] for i in range(0, len(full_text), 4000)
                 ]
                 # Первую часть отправляем как ответ на голосовое сообщение
-                first_msg = await message.reply(f"✨ Часть 1/{len(parts)}:\n\n{parts[0]}")
+                first_msg = await message.reply(
+                    f"✨ Часть 1/{len(parts)}:\n\n{parts[0]}"
+                )
                 # Обрабатываем имена в первой части
                 await process_name_mentions(first_msg, parts[0])
                 # Остальные части отправляем как обычные сообщения
@@ -409,59 +419,70 @@ async def handle_voice(message: types.Message):
             await message.reply(error_message)
 
 
-@dp.callback_query(lambda c: c.data.startswith('select_user:'))
+@dp.callback_query(lambda c: c.data.startswith("select_user:"))
 async def handle_user_selection(callback_query: types.CallbackQuery):
     try:
         # Получаем данные из callback
-        _, found_name, username = callback_query.data.split(':')
+        _, found_name, username = callback_query.data.split(":")
         message = callback_query.message
-        
+
         # Изменяем текст сообщения
         new_text = replace_name_with_username(message.text, found_name, username)
         
+        logger.debug(f"Callback: replacing name '{found_name}' with @{username}")
+        logger.debug(f"Callback: original text: {message.text}")
+        logger.debug(f"Callback: modified text: {new_text}")
+
         # Обновляем сообщение без клавиатуры
         await message.edit_text(new_text)
-        
+
         # Отвечаем на callback
-        await callback_query.answer("Имя заменено на @" + username)
+        await callback_query.answer(f"Имя '{found_name}' заменено на @{username}")
     except Exception as e:
         logger.error(f"Error handling user selection: {e}", exc_info=True)
         await callback_query.answer("Произошла ошибка при обработке выбора")
 
+
 async def process_name_mentions(message: types.Message, text: str) -> str:
     """Обрабатывает упоминания имен в тексте и возвращает обновленный текст"""
     try:
-        # Проверяем наличие имени в начале текста
-        found_name = llm_service.check_name_mention(text)
-        if not found_name:
+        # Получаем всех пользователей чата и анализируем текст с помощью LLM
+        found_name, matching_users = process_chat_message(message.chat.id, text, llm_service)
+
+        logger.debug(f"Found name: {found_name}")
+        logger.debug(f"Matching users: {matching_users}")
+
+        if not found_name or not matching_users:
             return text
 
-        # Ищем подходящих пользователей
-        matching_users = find_matching_users(message.chat.id, found_name)
-        
-        if not matching_users:
-            return text
-            
         if len(matching_users) == 1:
             # Если найден один пользователь, сразу заменяем имя
             firstname, username, _ = matching_users[0]
-            return replace_name_with_username(text, found_name, username)
+            new_text = replace_name_with_username(text, found_name, username)
+            logger.debug(f"Replacing name '{found_name}' with @{username}")
+            logger.debug(f"Original text: {text}")
+            logger.debug(f"Modified text: {new_text}")
+            
+            # Обновляем текст сообщения
+            await message.edit_text(new_text)
+            return new_text
         else:
             # Если найдено несколько пользователей, добавляем кнопки выбора
             builder = InlineKeyboardBuilder()
             for firstname, username, _ in matching_users:
                 builder.button(
                     text=f"{firstname} (@{username})",
-                    callback_data=f"select_user:{found_name}:{username}"
+                    callback_data=f"select_user:{found_name}:{username}",
                 )
             builder.adjust(1)  # По одной кнопке в ряд
-            
+
             # Отправляем сообщение с кнопками
             await message.edit_text(text, reply_markup=builder.as_markup())
             return text
     except Exception as e:
         logger.error(f"Error processing name mentions: {e}", exc_info=True)
         return text
+
 
 async def main():
     logger.info("Starting bot")
@@ -477,7 +498,9 @@ async def main():
 
         # Запуск бота
         logger.info("Starting polling...")
-        await dp.start_polling(bot, allowed_updates=["message", "edited_message"], skip_updates=True)
+        await dp.start_polling(
+            bot, allowed_updates=["message", "edited_message"], skip_updates=True
+        )
     except Exception as e:
         logger.error(f"Error in main loop: {str(e)}", exc_info=True)
     finally:

@@ -1,16 +1,14 @@
 from typing import List, Tuple, Optional
 from models import User, UserChat, Chat
 
-def find_matching_users(chat_id: int, found_name: str) -> List[Tuple[str, str, int]]:
+def process_chat_message(chat_id: int, text: str, llm_service) -> Tuple[Optional[str], List[Tuple[str, str, int]]]:
     """
-    Находит пользователей в чате, чьи имена соответствуют найденному имени
+    Обрабатывает сообщение из чата, ищет упоминания имен и соответствующих пользователей
     :param chat_id: ID чата
-    :param found_name: Найденное имя
-    :return: Список кортежей (firstname, username, user_id)
+    :param text: Текст сообщения
+    :param llm_service: Экземпляр LLMService для обработки имен
+    :return: Кортеж (найденное_имя, список_подходящих_пользователей)
     """
-    found_name = found_name.lower()
-    matching_users = []
-    
     # Получаем всех пользователей в чате
     chat_users = (User
                  .select(User.firstname, User.username, User.id)
@@ -19,11 +17,18 @@ def find_matching_users(chat_id: int, found_name: str) -> List[Tuple[str, str, i
                  .where(Chat.tg_chat_id == chat_id)
                  .tuples())
     
-    for firstname, username, user_id in chat_users:
-        if firstname and firstname.lower().startswith(found_name):
-            matching_users.append((firstname, username, user_id))
+    # Фильтруем пользователей без имени или username
+    valid_users = [
+        (firstname, username, user_id)
+        for firstname, username, user_id in chat_users
+        if firstname and username
+    ]
     
-    return matching_users
+    if not valid_users:
+        return None, []
+    
+    # Используем LLM для анализа текста и поиска соответствий
+    return llm_service.process_name_mention(text, valid_users)
 
 def replace_name_with_username(text: str, found_name: str, username: str) -> str:
     """
@@ -33,8 +38,18 @@ def replace_name_with_username(text: str, found_name: str, username: str) -> str
     :param username: Username пользователя
     :return: Измененный текст
     """
-    # Ищем имя в начале текста с учетом регистра
-    if text.lower().startswith(found_name.lower()):
-        name_end = len(found_name)
-        return f"@{username}" + text[name_end:]
+    import re
+
+    # Создаем регулярное выражение для поиска имени в начале текста
+    # Учитываем возможные пробелы и знаки препинания после имени
+    pattern = f"^{re.escape(found_name)}([\\s,.!?]|$)"
+    
+    # Ищем совпадение с учетом регистра
+    match = re.search(pattern, text, re.IGNORECASE)
+    if match:
+        # Получаем символ или пустую строку после имени
+        suffix = match.group(1) if match.group(1) else ''
+        # Заменяем имя на @username, сохраняя символ после имени
+        return f"@{username}{suffix}" + text[match.end():]
+    
     return text
