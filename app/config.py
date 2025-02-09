@@ -5,6 +5,7 @@ from typing import Optional
 class Settings(BaseSettings):
     BOT_TOKEN: str
     GLADIA_API_KEY: str
+    DEEPSEEK_API_KEY: str
     DEBUG: Optional[bool] = False
 
     class Config:
