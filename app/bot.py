@@ -21,9 +21,9 @@ log_handlers = [logging.StreamHandler()]
 
 if settings.DEBUG:
     log_handlers.append(logging.FileHandler("bot_debug.log"))
-    log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    log_format = "%(asctime)s - %(name)s - %(levellevel)s - %(message)s"
 else:
-    log_format = "%(asctime)s - %(levelname)s - %(message)s"
+    log_format = "%(asctime)s - %(levellevel)s - %(message)s"
 
 logging.basicConfig(level=log_level, format=log_format, handlers=log_handlers)
 logger = logging.getLogger(__name__)
@@ -261,7 +261,7 @@ async def handle_stats(message: types.Message):
                         else f"группе {chat_name}"
                     )
                     stats_message += (
-                        f"- {usage.created_at.strftime('%Y-%m-%d %H:%M:%S')} "
+                        f"- {usage.created_at.strftime('%Y-%m-%d %H:%М:%С')} "
                         f"в {chat_type}: {usage.duration:.1f} сек.\n"
                     )
 
@@ -347,6 +347,9 @@ async def handle_voice(message: types.Message):
             transcription = result["result"]["transcription"]
             full_text = transcription.get("full_transcript", "")
 
+            # Обработка упоминаний до отправки текста пользователю
+            full_text = await process_name_mentions(message.chat.id, full_text)
+
             # Логируем полный результат для отладки
             logger.info(f"Successfully transcribed audio. Full text: {full_text}")
 
@@ -380,25 +383,18 @@ async def handle_voice(message: types.Message):
             except Exception as e:
                 logger.warning(f"Failed to delete processing message: {e}")
 
-            # Отправляем текст транскрибации и обрабатываем имена
+            # Отправляем обработанный текст транскрибации
             if len(full_text) > 4000:  # Telegram limit is 4096, using 4000 to be safe
                 # Разбиваем длинный текст на части
                 parts = [
                     full_text[i : i + 4000] for i in range(0, len(full_text), 4000)
                 ]
-                # Первую часть отправляем как ответ на голосовое сообщение
-                first_msg = await message.reply(
-                    f"✨ Часть 1/{len(parts)}:\n\n{parts[0]}"
-                )
-                # Обрабатываем имена в первой части
-                await process_name_mentions(first_msg, parts[0])
-                # Остальные части отправляем как обычные сообщения
+                # Отправляем части последовательно
+                await message.reply(f"✨ Часть 1/{len(parts)}:\n\n{parts[0]}")
                 for i, part in enumerate(parts[1:], 2):
-                    msg = await message.answer(f"✨ Часть {i}/{len(parts)}:\n\n{part}")
-                    await process_name_mentions(msg, part)
+                    await message.answer(f"✨ Часть {i}/{len(parts)}:\n\n{part}")
             else:
-                msg = await message.reply(f"✨ Транскрибация:\n\n{full_text}")
-                await process_name_mentions(msg, full_text)
+                await message.reply(f"✨ Транскрибация:\n\n{full_text}")
         else:
             logger.error(
                 f"Failed to get transcription from result. Result structure: {json.dumps(result, indent=2, ensure_ascii=False)}"
@@ -419,35 +415,11 @@ async def handle_voice(message: types.Message):
             await message.reply(error_message)
 
 
-@dp.callback_query(lambda c: c.data.startswith("select_user:"))
-async def handle_user_selection(callback_query: types.CallbackQuery):
-    try:
-        # Получаем данные из callback
-        _, found_name, username = callback_query.data.split(":")
-        message = callback_query.message
-
-        # Изменяем текст сообщения
-        new_text = replace_name_with_username(message.text, found_name, username)
-        
-        logger.debug(f"Callback: replacing name '{found_name}' with @{username}")
-        logger.debug(f"Callback: original text: {message.text}")
-        logger.debug(f"Callback: modified text: {new_text}")
-
-        # Обновляем сообщение без клавиатуры
-        await message.edit_text(new_text)
-
-        # Отвечаем на callback
-        await callback_query.answer(f"Имя '{found_name}' заменено на @{username}")
-    except Exception as e:
-        logger.error(f"Error handling user selection: {e}", exc_info=True)
-        await callback_query.answer("Произошла ошибка при обработке выбора")
-
-
-async def process_name_mentions(message: types.Message, text: str) -> str:
+async def process_name_mentions(chat_id: int, text: str) -> str:
     """Обрабатывает упоминания имен в тексте и возвращает обновленный текст"""
     try:
         # Получаем всех пользователей чата и анализируем текст с помощью LLM
-        found_name, matching_users = process_chat_message(message.chat.id, text, llm_service)
+        found_name, matching_users = process_chat_message(chat_id, text, llm_service)
 
         logger.debug(f"Found name: {found_name}")
         logger.debug(f"Matching users: {matching_users}")
@@ -462,23 +434,9 @@ async def process_name_mentions(message: types.Message, text: str) -> str:
             logger.debug(f"Replacing name '{found_name}' with @{username}")
             logger.debug(f"Original text: {text}")
             logger.debug(f"Modified text: {new_text}")
-            
-            # Обновляем текст сообщения
-            await message.edit_text(new_text)
             return new_text
-        else:
-            # Если найдено несколько пользователей, добавляем кнопки выбора
-            builder = InlineKeyboardBuilder()
-            for firstname, username, _ in matching_users:
-                builder.button(
-                    text=f"{firstname} (@{username})",
-                    callback_data=f"select_user:{found_name}:{username}",
-                )
-            builder.adjust(1)  # По одной кнопке в ряд
-
-            # Отправляем сообщение с кнопками
-            await message.edit_text(text, reply_markup=builder.as_markup())
-            return text
+        
+        return text
     except Exception as e:
         logger.error(f"Error processing name mentions: {e}", exc_info=True)
         return text
