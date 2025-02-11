@@ -36,10 +36,23 @@ dp = Dispatcher()
 llm_service = LLMService(settings.DEEPSEEK_API_KEY)
 
 
-# Логирование всех входящих обновлений
+# Логирование всех входящих обновлений и обновление данных пользователей
 @dp.update()
 async def log_update(update):
     logger.debug(f"Received update: {update.dict()}")
+    
+    try:
+        # Проверяем, есть ли в обновлении информация о пользователе и чате
+        if hasattr(update, 'message') and update.message:
+            with db:
+                user = upsert_user(update.message.from_user)
+                chat = upsert_chat(update.message)
+                upsert_user_chat(user, chat)
+                logger.debug(
+                    f"Successfully processed update: user={user.id}, chat={chat.id}"
+                )
+    except Exception as e:
+        logger.error(f"Error processing update metadata: {e}", exc_info=True)
 
 
 async def download_voice_message(file: BinaryIO) -> bytes:
@@ -130,6 +143,7 @@ async def transcribe_audio(audio_url: str) -> dict:
         return {}
 
 
+# Remove upsert operations from handle_text since they're now in update handler
 @dp.message(
     lambda message: message.text
     and not message.text.startswith("/")
@@ -137,24 +151,13 @@ async def transcribe_audio(audio_url: str) -> dict:
     and not message.audio
 )
 async def handle_text(message: types.Message):
-    """Обработчик текстовых сообщений (не команд) для сохранения информации о пользователях и чатах"""
+    """Обработчик текстовых сообщений (не команд)"""
     logger.debug(
         f"Received message type: text={bool(message.text)}, voice={bool(message.voice)}, audio={bool(message.audio)}"
     )
     logger.debug(
         f"Received text message from user {message.from_user.id} in chat {message.chat.id}"
     )
-    try:
-        with db:
-            # Используем существующие функции upsert для оптимальной работы с БД
-            user = upsert_user(message.from_user)
-            chat = upsert_chat(message)
-            upsert_user_chat(user, chat)
-            logger.debug(
-                f"Successfully processed message: user={user.id}, chat={chat.id}"
-            )
-    except Exception as e:
-        logger.error(f"Error processing text message: {e}", exc_info=True)
 
 
 async def get_transcription_result(result_url: str) -> dict:
@@ -195,15 +198,10 @@ async def get_transcription_result(result_url: str) -> dict:
         raise
 
 
+# Remove upsert operations from handle_start
 @dp.message(CommandStart())
 async def handle_start(message: types.Message):
     logger.info(f"Received /start command from user {message.from_user.id}")
-    with db:
-        user = upsert_user(message.from_user)
-        logger.info(
-            f"User {user.id} ({user.username or user.firstname}) started the bot"
-        )
-
     await message.answer(
         "Привет! Я бот для транскрибации голосовых сообщений.\n"
         "🎤 Отправь мне голосовое сообщение, и я преобразую его в текст.\n"
@@ -211,13 +209,12 @@ async def handle_start(message: types.Message):
     )
 
 
+# Update handle_stats to not do upsert
 @dp.message(Command("stats"))
 async def handle_stats(message: types.Message):
     logger.info(f"Received /stats command from user {message.from_user.id}")
     try:
         with db:
-            user = upsert_user(message.from_user)
-
             # Получаем общую статистику пользователя
             total_duration = (
                 Usage.select(fn.SUM(Usage.duration))
@@ -261,7 +258,7 @@ async def handle_stats(message: types.Message):
                         else f"группе {chat_name}"
                     )
                     stats_message += (
-                        f"- {usage.created_at.strftime('%Y-%m-%d %H:%М:%С')} "
+                        f"- {usage.created_at.strftime('%Y-%м-%d %H:%М:%С')} "
                         f"в {chat_type}: {usage.duration:.1f} сек.\n"
                     )
 
@@ -272,24 +269,13 @@ async def handle_stats(message: types.Message):
         await message.answer("❌ Произошла ошибка при получении статистики.")
 
 
+# Update handle_voice to remove duplicate upsert operations
 @dp.message(lambda message: message.voice or message.audio)
 async def handle_voice(message: types.Message):
     logger.info(
         f"Received {'voice' if message.voice else 'audio'} message from user {message.from_user.id}"
     )
     logger.debug(f"Message content: {message.dict()}")
-
-    # Сохраняем информацию о пользователе и чате
-    try:
-        with db:
-            user = upsert_user(message.from_user)
-            chat = upsert_chat(message)
-            upsert_user_chat(user, chat)
-            logger.debug(
-                f"Successfully processed voice message metadata: user={user.id}, chat={chat.id}"
-            )
-    except Exception as e:
-        logger.error(f"Error processing voice message metadata: {e}", exc_info=True)
 
     processing_msg = await message.reply("🎯 Начинаю обработку голосового сообщения...")
 
